@@ -219,6 +219,35 @@ struct FoldedWrites
       particleIndices[FOLD_INDEX(2*i+1,0,2)] = O  | (1<<RB_BIT);
       particleIndices[FOLD_INDEX(2*i+1,1,2)] = H2 | (0<<RB_BIT);
     }
+
+    /* Demonstrate that there are no conflicts */
+    {
+      std::vector<bool> slot_used(nParticles*2);
+      for( size_t i = 0; i < nTerms; ++i ) {
+        uint32_t p0 = particleIndices[FOLD_INDEX(i,0,2)];
+        uint32_t p1 = particleIndices[FOLD_INDEX(i,1,2)];
+        
+        uint32_t slot0 = p0 >> RB_BIT;
+        uint32_t slot1 = p1 >> RB_BIT;
+        
+        p0 &= RB_MASK;
+        p1 &= RB_MASK;
+
+        if( slot_used[2*p0+slot0] ){
+          fprintf(stderr,"Index set will lead to write conflicts\n");
+          exit(1);
+        } else {
+          slot_used[2*p0+slot0] = true;
+        }
+        
+        if( slot_used[2*p1+slot1] ){
+          fprintf(stderr,"Index set will lead to write conflicts\n");
+          exit(1);
+        } else {
+          slot_used[2*p1+slot1] = true;
+        }
+      }
+    }
     
     /* Allocate device buffer for indices and upload them */
     cudaMalloc(&dev_indices, sizeof(uint32_t) * FOLD_LENGTH_PAD( nTerms ) * 2);
@@ -238,6 +267,15 @@ struct FoldedWrites
     cudaMemset( dev_num_failures, 0x0, sizeof(uint32_t) );
   }
   
+  ~FoldedWrites()
+  {
+    cudaFree(dev_num_failures);
+    cudaFree(dev_reference_checksum);
+    cudaFree(dev_checksums);
+    cudaFree(dev_data);
+    cudaFree(dev_indices);
+    cudaDeviceReset();
+  }
   
   /* Do NUM_PASSES passes of writes, with pass i checksumming the 
      result and writing into dev_checksum_write_buffer[i]. */
@@ -293,6 +331,14 @@ struct FoldedWrites
                 sizeof(uint32_t), cudaMemcpyDeviceToHost );
     cudaDeviceSynchronize();
     
+    cudaError_t lastError = cudaGetLastError();
+    if( cudaSuccess != lastError ){
+      fprintf(stderr,"CUDA ERROR: %s\n",
+              cudaGetErrorString(lastError));
+      exit(1);
+    }
+    
+    cudaStreamDestroy( stream );
     return *num_failures;
   }
 };
