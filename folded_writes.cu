@@ -35,6 +35,15 @@ enum { FOLD_LENGTH = 32,
   (((x)+FOLD_LENGTH-1)&(~(FOLD_LENGTH-1)))
 
 
+#define GPU_CHECK_ERROR_STATE() do {            \
+    cudaError_t __ = cudaGetLastError();        \
+    if( cudaSuccess != __ ){                    \
+      fprintf(stderr,"CUDA ERROR[LINE:%4d]: %s\n",        \
+              __LINE__,cudaGetErrorString(__));           \
+      exit(1);                                            \
+    }                                           \
+  } while(0)
+
 /* Compare the checksums in _result0 and _result1, if they 
    do not match atomically increment _num_failures by one.
    The length of the arrays _result[01] is NUM_PASSES, 
@@ -92,12 +101,27 @@ HASH( float4   const * _result,
     local ^= (c>>3)|(c<<(32-3));
     local ^= (d>>4)|(d<<(32-4));
   }
+
+# if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 300 
   
   local ^= __shfl_xor(local,  1, warpSize);
   local ^= __shfl_xor(local,  2, warpSize);
   local ^= __shfl_xor(local,  4, warpSize);
   local ^= __shfl_xor(local,  8, warpSize);
   local ^= __shfl_xor(local, 16, warpSize);
+
+# else
+  
+  uint32_t volatile __shared__ warp_reduce[BDIM];
+  warp_reduce[threadIdx.x] = local;
+  warp_reduce[threadIdx.x] ^= warp_reduce[threadIdx.x^1];
+  warp_reduce[threadIdx.x] ^= warp_reduce[threadIdx.x^2];
+  warp_reduce[threadIdx.x] ^= warp_reduce[threadIdx.x^4];
+  warp_reduce[threadIdx.x] ^= warp_reduce[threadIdx.x^8];
+  warp_reduce[threadIdx.x] ^= warp_reduce[threadIdx.x^16];
+  local = warp_reduce[threadIdx.x];
+  
+# endif
 
   if( (threadIdx.x & 0x1f) == 0 )
     atomicXor( _checksum, local );
@@ -294,6 +318,7 @@ struct FoldedWrites
           i * 1.234e-3f,
           nTerms );
       int nBlocksP = (nParticles + BDIM - 1)/BDIM;
+
       HASH<<< nBlocksP, BDIM, 0, stream >>>
         ( dev_data, dev_checksum_write_buffer + i, nParticles );
     }
@@ -350,7 +375,7 @@ int main( int argc, char * argv[] )
 {
   if( argc < 2 ) {
     printf("Usage: %s [num_passes]\n",argv[0]);
-    printf("Takes about 3 minutes per 100 passes\n");
+    printf("Takes about 100 seconds per pass\n");
     return 1;
   }
 
@@ -358,7 +383,15 @@ int main( int argc, char * argv[] )
   printf("Going to run %8d passes\n",num_passes);
   fflush(stdout);
 
+  /* Compute capability < 3.0 has a maximum grid size 
+     of 65535, let's make sure we do not have more than
+     that. */
+  
+# if not defined __CUDA_ARCH__ || __CUDA_ARCH__ < 300
+  FoldedWrites memcheck( 65535 * 128 / 3 );
+# else
   FoldedWrites memcheck( 4234567 );
+# endif
   
   int num_failures = -1;
   for( size_t i = 0; i < num_passes; ++i ){
